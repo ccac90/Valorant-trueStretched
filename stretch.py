@@ -94,6 +94,12 @@ def get_mode():
     return mode.PelsWidth, mode.PelsHeight, mode.DisplayFrequency
 
 
+def get_registry_mode():
+    """Windows에 저장된 기본 디스플레이 모드를 읽는다."""
+    mode = win32api.EnumDisplaySettings(None, win32con.ENUM_REGISTRY_SETTINGS)
+    return mode.PelsWidth, mode.PelsHeight, mode.DisplayFrequency
+
+
 def mode_exists(width, height):
     index = 0
     while True:
@@ -104,6 +110,23 @@ def mode_exists(width, height):
         if mode.PelsWidth == width and mode.PelsHeight == height:
             return True
         index += 1
+
+
+def widest_mode_for_height(height):
+    """같은 세로 해상도에서 가장 넓은 등록 모드를 기본 해상도 후보로 삼는다."""
+    index = 0
+    candidates = []
+    while True:
+        try:
+            mode = win32api.EnumDisplaySettings(None, index)
+        except win32api.error:
+            break
+        if mode.PelsHeight == height:
+            candidates.append((mode.PelsWidth, mode.PelsHeight, mode.DisplayFrequency))
+        index += 1
+    if not candidates:
+        raise RuntimeError(f"세로 {height}px의 기본 해상도 후보를 찾지 못했습니다.")
+    return max(candidates, key=lambda item: (item[0], item[2]))
 
 
 def set_resolution(width, height, frequency=None):
@@ -180,15 +203,22 @@ def restore_from_state(quiet=False):
         return True
     state = load_json(STATE_PATH)
     errors = []
-    try:
-        set_resolution(state["native_width"], state["native_height"], state.get("native_hz"))
-    except Exception as exc:
-        errors.append(str(exc))
+    # 모니터를 먼저 되살린 뒤 해상도를 적용해야 장치 재인식 과정에서
+    # NVIDIA가 스트레치 해상도를 다시 덮어쓰지 않는다.
     if state.get("monitor_was_enabled"):
         try:
             set_monitor_enabled(state["monitor_instance_id"], True)
         except Exception as exc:
             errors.append(str(exc))
+    try:
+        time.sleep(1)
+        set_resolution(state["native_width"], state["native_height"], state.get("native_hz"))
+        time.sleep(1)
+        current = get_mode()
+        if current[:2] != (state["native_width"], state["native_height"]):
+            set_resolution(state["native_width"], state["native_height"], None)
+    except Exception as exc:
+        errors.append(str(exc))
     if not errors:
         STATE_PATH.unlink(missing_ok=True)
         if not quiet:

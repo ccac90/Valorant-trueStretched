@@ -10,8 +10,9 @@ if (-not (Test-Path -LiteralPath $python)) {
     --noconfirm `
     --clean `
     --onefile `
+    --windowed `
     --uac-admin `
     --name ValorantTrueStretch `
-    (Join-Path $PSScriptRoot "stretch.py")
+    (Join-Path $PSScriptRoot "gui.py")
 
 Write-Host "Build complete: $PSScriptRoot\dist\ValorantTrueStretch.exe"
