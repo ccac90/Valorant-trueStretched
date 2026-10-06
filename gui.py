@@ -9,7 +9,7 @@ import webview
 
 import stretch
 
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.17"
 
 
 HTML = r"""
@@ -23,8 +23,12 @@ label{display:block;font-size:13px;color:#555;margin:10px 0 6px}select,input{wid
 .version{float:right;color:#777;font-size:12px;font-weight:400}
 #status{height:90px;overflow:auto;white-space:pre-wrap;border:1px solid #ddd;background:#fafafa;border-radius:6px;padding:10px;font:12px Consolas,"Malgun Gothic",monospace;color:#165c2d}
 #hotkey{font-weight:700;text-align:center;cursor:pointer}.notice{font-size:11px;color:#777;margin-top:10px}
+#startupNotice{display:none;align-items:center;gap:9px;margin:-8px 0 16px;padding:10px 13px;border:1px solid #b8cce8;border-radius:7px;background:#eef5ff;color:#18549a;font-size:13px;font-weight:600}
+body.starting #startupNotice{display:flex}.spinner{width:17px;height:17px;border:2px solid #b8cce8;border-top-color:#1670e8;border-radius:50%;animation:spin .8s linear infinite;flex:none}@keyframes spin{to{transform:rotate(360deg)}}
+select:disabled,input:disabled,button:disabled{background:#f1f1f1;color:#999;border-color:#d5d5d5;cursor:wait}
 </style></head><body>
 <h1>발로란트 트루 스트레치 <span class="version" id="version"></span></h1><div class="sub">모니터 설정과 스트레치 해상도를 간편하게 전환합니다.</div>
+<div id="startupNotice"><div class="spinner"></div><span id="startupText">모니터 설정 적용 중... 완료될 때까지 잠시 기다려 주세요.</span></div>
 <div class="card"><b>기본 설정</b>
 <label>게임용 모니터</label><select id="monitor"></select><div class="native" id="native">불러오는 중...</div>
 <div class="row"><div><label>목표 가로</label><input id="width" type="number"></div><div><label>목표 세로</label><input id="height" type="number"></div></div>
@@ -33,17 +37,19 @@ label{display:block;font-size:13px;color:#555;margin:10px 0 6px}select,input{wid
 <div class="buttons"><button onclick="recommend()">추천값</button><button class="primary" onclick="saveStart()">설정 저장 및 시작</button><button onclick="checkRes()">해상도 등록 확인</button><button onclick="nvidia()">NVIDIA 제어판</button></div>
 <div class="notice">사용자 지정 해상도는 NVIDIA 제어판에 최초 한 번 등록해야 합니다.</div></div>
 <div class="card"><b>실행</b><p class="hint">발로란트는 전체 화면 창 모드 + 채우기로 설정하세요. 실제 게임에 완전히 진입한 뒤 전환하세요.</p>
-<div class="buttons"><button class="primary" id="toggle" onclick="toggle()">스트레치 전환</button><button class="restore" onclick="restoreAll()">완전 복구</button></div></div>
+<div class="buttons"><button class="primary" id="toggle" onclick="toggle()">스트레치 전환</button><button class="restore" onclick="restoreAll()">완전 복구</button><button class="restore" onclick="resetMonitors()">모니터 설정 초기화</button></div></div>
 <div class="card"><b>상태</b><div id="status">시작 중...</div></div>
 <script>
 let app=null,busy=false,capturing=false,hotkeyVk=119,hotkeyName='F8';
 function log(s){const e=document.getElementById('status');e.textContent+=`\n${s}`;e.scrollTop=e.scrollHeight}
-function setBusy(v){busy=v;document.querySelectorAll('button').forEach(x=>x.disabled=v)}
+function setBusy(v){busy=v;document.querySelectorAll('button,select,input').forEach(x=>x.disabled=v)}
 function values(){return{monitor_index:document.getElementById('monitor').selectedIndex,width:+document.getElementById('width').value,height:+document.getElementById('height').value,hotkey_vk:hotkeyVk,hotkey_name:hotkeyName}}
 function captureKey(){capturing=true;document.getElementById('hotkey').value='키를 누르세요...'}
 document.addEventListener('keydown',e=>{if(!capturing)return;e.preventDefault();if(['Shift','Control','Alt','Meta'].includes(e.key))return;hotkeyVk=e.keyCode;hotkeyName=e.key.length===1?e.key.toUpperCase():e.key.toUpperCase();document.getElementById('hotkey').value=hotkeyName;capturing=false});
 function choosePreset(w,h,name){document.getElementById('width').value=w;document.getElementById('height').value=h;log(`${name}: ${w}×${h} 선택`)}
-async function init(){app=await pywebview.api.get_state();document.getElementById('version').textContent=`v${app.version}`;const m=document.getElementById('monitor');m.innerHTML='';app.monitors.forEach((x,i)=>{const o=document.createElement('option');o.textContent=`${x.name} [${x.status}]`;m.appendChild(o)});m.selectedIndex=app.selected_index;document.getElementById('native').textContent=`기본: ${app.native_width} × ${app.native_height} @ ${app.native_hz}Hz`;document.getElementById('width').value=app.target_width;document.getElementById('height').value=app.target_height;const p=document.getElementById('presets');app.presets.forEach(x=>{const b=document.createElement('button');b.className='preset';b.innerHTML=`<b>${x.width}×${x.height}</b>${x.name}`;b.onclick=()=>choosePreset(x.width,x.height,x.name);p.appendChild(b)});hotkeyVk=app.hotkey_vk;hotkeyName=app.hotkey_name;document.getElementById('hotkey').value=hotkeyName;document.getElementById('status').textContent=app.message}
+function painted(){return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))}
+async function autoStart(){if(!app.has_config)return;document.getElementById('startupText').textContent='모니터 설정 적용 중... 완료될 때까지 잠시 기다려 주세요.';document.body.classList.add('starting');setBusy(true);log('저장된 설정을 자동 적용하는 중...');await painted();try{const r=await pywebview.api.start_saved_session();log(r.message)}catch(e){log(`자동 적용 실패: ${e}`)}finally{document.body.classList.remove('starting');setBusy(false)}}
+async function init(){app=await pywebview.api.get_state();document.getElementById('version').textContent=`v${app.version}`;const m=document.getElementById('monitor');m.innerHTML='';app.monitors.forEach((x,i)=>{const o=document.createElement('option');o.textContent=`${x.name} [${x.status}]`;m.appendChild(o)});m.selectedIndex=app.selected_index;document.getElementById('native').textContent=`기본: ${app.native_width} × ${app.native_height} @ ${app.native_hz}Hz`;document.getElementById('width').value=app.target_width;document.getElementById('height').value=app.target_height;const p=document.getElementById('presets');app.presets.forEach(x=>{const b=document.createElement('button');b.className='preset';b.innerHTML=`<b>${x.width}×${x.height}</b>${x.name}`;b.onclick=()=>choosePreset(x.width,x.height,x.name);p.appendChild(b)});hotkeyVk=app.hotkey_vk;hotkeyName=app.hotkey_name;document.getElementById('hotkey').value=hotkeyName;document.getElementById('status').textContent=app.message;await painted();setTimeout(autoStart,1000)}
 async function recommend(){const r=await pywebview.api.recommend();document.getElementById('width').value=r.width;document.getElementById('height').value=r.height;log(`추천값: ${r.width}×${r.height}`)}
 async function call(fn){if(busy)return;setBusy(true);try{return await fn()}catch(e){log(`오류: ${e}`);alert(e)}finally{setBusy(false)}}
 async function saveStart(){await call(async()=>{const r=await pywebview.api.save_and_start(values());log(r.message)})}
@@ -51,8 +57,9 @@ async function checkRes(){await call(async()=>{const r=await pywebview.api.check
 async function nvidia(){await pywebview.api.open_nvidia()}
 async function toggle(){await call(async()=>{const r=await pywebview.api.toggle();document.getElementById('toggle').textContent=r.stretched?'기본 해상도로':'스트레치 전환';log(r.message)})}
 async function restoreAll(){await call(async()=>{const r=await pywebview.api.restore_all();document.getElementById('toggle').textContent='스트레치 전환';log(r.message)})}
+async function resetMonitors(){if(!confirm('Windows에 등록된 모니터 장치를 제거하고 다시 검색합니다. 화면이 잠시 깜빡일 수 있습니다. 계속할까요?'))return;document.getElementById('startupText').textContent='모니터 설정 초기화 중... 화면이 잠시 깜빡일 수 있습니다.';document.body.classList.add('starting');await call(async()=>{const r=await pywebview.api.reset_monitor_settings();document.getElementById('toggle').textContent='스트레치 전환';log(r.message);alert(r.message)});document.body.classList.remove('starting')}
 function externalStatus(message,stretched){document.getElementById('toggle').textContent=stretched?'기본 해상도로':'스트레치 전환';log(message)}
-window.addEventListener('pywebviewready',init);
+window.addEventListener('pywebviewready',()=>setTimeout(init,50));
 </script></body></html>
 """
 
@@ -62,6 +69,7 @@ class Api:
         self.window = None
         self.lock = threading.RLock()
         self.config = None
+        self.monitors = []
         self.session_started = False
         self.stretched = False
         self.running = True
@@ -91,14 +99,20 @@ class Api:
     def get_state(self):
         message = "모니터와 해상도를 선택한 뒤 '설정 저장 및 시작'을 누르세요."
         if stretch.STATE_PATH.exists():
-            if stretch.restore_from_state(quiet=True):
-                message = "이전 비정상 종료 상태를 복구했습니다."
-        monitors = stretch.list_monitors()
-        native_width, native_height, native_hz = stretch.get_mode()
-        target_width, target_height = self.recommended(native_width, native_height)
+            message = "이전 실행 상태를 감지했습니다. 자동 복구 후 저장 설정을 적용합니다."
         selected_index, hotkey_vk, hotkey_name = 0, 119, "F8"
         if stretch.CONFIG_PATH.exists():
             self.config = stretch.load_json(stretch.CONFIG_PATH)
+            cached = self.config.get("monitor_cache") or [{
+                "name": self.config.get("monitor_name", "저장된 모니터"),
+                "id": self.config.get("monitor_instance_id", ""),
+            }]
+            monitors = [{"name": item["name"], "id": item["id"], "status": "저장됨"}
+                        for item in cached if item.get("id")]
+            native_width = int(self.config.get("native_width", 1920))
+            native_height = int(self.config.get("native_height", 1080))
+            native_hz = int(self.config.get("native_hz", 60))
+            target_width, target_height = self.recommended(native_width, native_height)
             target_width = int(self.config.get("target_width", target_width))
             target_height = int(self.config.get("target_height", target_height))
             hotkey_vk = int(self.config.get("hotkey_vk", 119))
@@ -106,18 +120,26 @@ class Api:
             for index, monitor in enumerate(monitors):
                 if monitor["id"] == self.config.get("monitor_instance_id"):
                     selected_index = index
-                    try:
-                        self._start_session(self.config)
-                        message += "\n저장된 모니터를 자동으로 사용 안 함 처리했습니다."
-                    except Exception as exc:
-                        message += f"\n자동 시작 실패: {exc}"
                     break
+        else:
+            monitors = stretch.list_monitors()
+            native_width, native_height, native_hz = stretch.get_mode()
+            target_width, target_height = self.recommended(native_width, native_height)
+        self.monitors = monitors
         return {"version": APP_VERSION, "monitors": monitors,
                 "native_width": native_width, "native_height": native_height,
                 "native_hz": native_hz, "target_width": target_width, "target_height": target_height,
                 "selected_index": selected_index, "hotkey_vk": hotkey_vk,
                 "hotkey_name": hotkey_name, "presets": self.presets(native_width, native_height),
+                "has_config": bool(self.config),
                 "message": message}
+
+    def start_saved_session(self):
+        with self.lock:
+            if not self.config:
+                return {"message": "저장된 설정이 없습니다."}
+            self._start_session(self.config)
+            return {"message": "저장된 설정을 자동 적용했습니다. 단축키로 전환할 수 있습니다."}
 
     def recommend(self):
         width, height, _ = stretch.get_mode()
@@ -125,7 +147,7 @@ class Api:
         return {"width": target_width, "height": target_height}
 
     def _make_config(self, data):
-        monitors = stretch.list_monitors()
+        monitors = self.monitors or stretch.list_monitors()
         index = int(data["monitor_index"])
         if index < 0 or index >= len(monitors):
             raise ValueError("올바른 모니터를 선택하세요.")
@@ -140,11 +162,16 @@ class Api:
                 "target_width": width, "target_height": height,
                 "hotkey_vk": int(data["hotkey_vk"]), "hotkey_name": data["hotkey_name"],
                 "native_width": native_width, "native_height": native_height,
-                "native_hz": native_hz}
+                "native_hz": native_hz,
+                "monitor_cache": [{"name": item["name"], "id": item["id"]}
+                                  for item in monitors]}
 
     def _start_session(self, config):
         if self.session_started:
             return
+        if stretch.STATE_PATH.exists():
+            if not stretch.restore_from_state(quiet=True):
+                raise RuntimeError("이전 상태 복구에 실패했습니다. 완전 복구를 눌러주세요.")
         width, height = int(config["target_width"]), int(config["target_height"])
         if not stretch.mode_exists(width, height):
             raise RuntimeError(f"{width}×{height} 해상도를 NVIDIA 제어판에 먼저 등록하세요.")
@@ -245,6 +272,7 @@ class Api:
                     raise RuntimeError("자동 복구에 실패했습니다. 장치 관리자를 확인하세요.")
                 if self.config:
                     # '완전 복구'는 시작 당시 상태와 관계없이 선택 모니터를 사용함으로 만든다.
+                    # 함수가 현재 상태를 먼저 확인하므로 이미 활성화됐으면 즉시 끝난다.
                     stretch.set_monitor_enabled(self.config["monitor_instance_id"], True)
             elif self.config:
                 # 상태 파일이 없어도 저장된 모니터와 가장 넓은 정상 해상도로 복구한다.
@@ -260,6 +288,38 @@ class Api:
             self.session_started = False
             self.stretched = False
             return {"stretched": False, "message": "기본 해상도와 모니터 사용 상태를 완전히 복구했습니다."}
+
+    def reset_monitor_settings(self):
+        with self.lock:
+            native = None
+            if self.config:
+                native = (int(self.config.get("native_width", 1920)),
+                          int(self.config.get("native_height", 1080)),
+                          int(self.config.get("native_hz", 60)))
+            try:
+                self.restore_all()
+            except Exception:
+                # 장치 기록 자체가 꼬인 경우 복구 실패와 무관하게 초기화를 계속한다.
+                pass
+            if native:
+                try:
+                    stretch.set_resolution(*native)
+                except Exception:
+                    pass
+            removed = stretch.reset_monitor_devices()
+            if native:
+                try:
+                    stretch.set_resolution(*native)
+                except Exception:
+                    pass
+            stretch.STATE_PATH.unlink(missing_ok=True)
+            stretch.CONFIG_PATH.unlink(missing_ok=True)
+            self.config = None
+            self.monitors = []
+            self.session_started = False
+            self.stretched = False
+            return {"message": (f"모니터 장치 {removed}개와 프로그램 설정을 초기화했습니다. "
+                                "프로그램을 종료하고 다시 실행해 설정하세요.")}
 
     def close(self):
         self.running = False
@@ -293,13 +353,18 @@ def main():
         stretch.relaunch_as_admin()
         return
     ctypes.windll.user32.SetProcessDPIAware()
+    # 임시 WebView2 프로필을 매번 새로 만들지 않도록 영구 프로필을 재사용한다.
+    webview_data = stretch.CONFIG_DIR / "webview"
+    webview_data.mkdir(parents=True, exist_ok=True)
     api = Api()
     window = webview.create_window("Valorant True Stretch", html=HTML, js_api=api,
-                                   width=680, height=760, min_size=(620, 650), background_color="#ffffff")
+                                   width=680, height=760, min_size=(620, 650),
+                                   background_color="#ffffff")
     api.window = window
     window.events.closing += api.on_closing
     threading.Thread(target=api.hotkey_loop, daemon=True).start()
-    webview.start(gui="edgechromium", debug=False)
+    webview.start(gui="edgechromium", debug=False, private_mode=False,
+                  storage_path=str(webview_data))
 
 
 if __name__ == "__main__":

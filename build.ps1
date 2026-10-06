@@ -12,6 +12,7 @@ if (-not (Test-Path -LiteralPath $python)) {
     --onefile `
     --windowed `
     --uac-admin `
+    --icon (Join-Path $PSScriptRoot "assets\app-icon-blue-c.ico") `
     --name ValorantTrueStretch `
     (Join-Path $PSScriptRoot "gui.py")
 

@@ -1,5 +1,6 @@
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import subprocess
@@ -17,6 +18,85 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 STATE_PATH = CONFIG_DIR / "recovery.json"
 VK_F8 = 0x77
 VK_F9 = 0x78
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+class SP_DEVINFO_DATA(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD),
+                ("ClassGuid", GUID),
+                ("DevInst", wintypes.DWORD),
+                ("Reserved", ctypes.c_void_p)]
+
+
+GUID_DEVCLASS_MONITOR = GUID(
+    0x4D36E96E, 0xE325, 0x11CE,
+    (ctypes.c_ubyte * 8)(0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18),
+)
+DIGCF_PRESENT = 0x00000002
+SPDRP_DEVICEDESC = 0x00000000
+SPDRP_FRIENDLYNAME = 0x0000000C
+DN_STARTED = 0x00000008
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
+_cfgmgr32 = ctypes.WinDLL("cfgmgr32", use_last_error=True)
+_setupapi.SetupDiGetClassDevsW.restype = wintypes.HANDLE
+_setupapi.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(GUID), wintypes.LPCWSTR,
+                                           wintypes.HWND, wintypes.DWORD]
+_setupapi.SetupDiEnumDeviceInfo.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                            ctypes.POINTER(SP_DEVINFO_DATA)]
+_setupapi.SetupDiGetDeviceInstanceIdW.argtypes = [
+    wintypes.HANDLE, ctypes.POINTER(SP_DEVINFO_DATA), wintypes.LPWSTR,
+    wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+_setupapi.SetupDiGetDeviceRegistryPropertyW.argtypes = [
+    wintypes.HANDLE, ctypes.POINTER(SP_DEVINFO_DATA), wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(ctypes.c_ubyte),
+    wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+_setupapi.SetupDiDestroyDeviceInfoList.argtypes = [wintypes.HANDLE]
+_cfgmgr32.CM_Get_DevNode_Status.argtypes = [ctypes.POINTER(wintypes.ULONG),
+                                            ctypes.POINTER(wintypes.ULONG),
+                                            wintypes.DWORD, wintypes.ULONG]
+_cfgmgr32.CM_Locate_DevNodeW.argtypes = [ctypes.POINTER(wintypes.DWORD),
+                                         wintypes.LPWSTR, wintypes.ULONG]
+_cfgmgr32.CM_Enable_DevNode.argtypes = [wintypes.DWORD, wintypes.ULONG]
+_cfgmgr32.CM_Disable_DevNode.argtypes = [wintypes.DWORD, wintypes.ULONG]
+CM_DISABLE_PERSIST = 0x00000008
+
+
+def _device_property(device_set, device_info, prop):
+    buffer = ctypes.create_unicode_buffer(512)
+    reg_type = wintypes.DWORD()
+    required = wintypes.DWORD()
+    ok = _setupapi.SetupDiGetDeviceRegistryPropertyW(
+        device_set, ctypes.byref(device_info), prop, ctypes.byref(reg_type),
+        ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)),
+        ctypes.sizeof(buffer), ctypes.byref(required),
+    )
+    return buffer.value if ok else ""
+
+
+def _device_started(devinst):
+    status = wintypes.ULONG()
+    problem = wintypes.ULONG()
+    result = _cfgmgr32.CM_Get_DevNode_Status(
+        ctypes.byref(status), ctypes.byref(problem), devinst, 0
+    )
+    return result == 0 and bool(status.value & DN_STARTED)
+
+
+def _locate_device(instance_id):
+    devinst = wintypes.DWORD()
+    result = _cfgmgr32.CM_Locate_DevNodeW(
+        ctypes.byref(devinst), instance_id, 0
+    )
+    if result != 0:
+        raise RuntimeError("저장된 모니터 장치를 찾지 못했습니다.")
+    return devinst.value
 
 
 def is_admin():
@@ -38,55 +118,110 @@ def relaunch_as_admin():
         raise RuntimeError("관리자 권한 실행이 취소되었거나 실패했습니다.")
 
 
-def run_powershell(command):
-    prefix = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
-    return subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", prefix + command],
-        capture_output=True,
-        text=True,
-        errors="replace",
+def list_monitors(present_only=True):
+    flags = DIGCF_PRESENT if present_only else 0
+    device_set = _setupapi.SetupDiGetClassDevsW(
+        ctypes.byref(GUID_DEVCLASS_MONITOR), None, None, flags
     )
-
-
-def list_monitors():
-    result = run_powershell(
-        "Get-PnpDevice -Class Monitor | ForEach-Object { "
-        "Write-Output ($_.FriendlyName + \"`t\" + $_.InstanceId + \"`t\" + $_.Status) }"
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"모니터 목록 조회 실패: {result.stderr.strip()}")
+    if device_set == INVALID_HANDLE_VALUE:
+        raise RuntimeError("Windows 장치 API에서 모니터 목록 조회에 실패했습니다.")
     monitors = []
-    for line in result.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 3:
-            monitors.append({"name": parts[0], "id": parts[1], "status": parts[2]})
+    try:
+        index = 0
+        while True:
+            info = SP_DEVINFO_DATA()
+            info.cbSize = ctypes.sizeof(SP_DEVINFO_DATA)
+            if not _setupapi.SetupDiEnumDeviceInfo(
+                    device_set, index, ctypes.byref(info)):
+                break
+            instance_buffer = ctypes.create_unicode_buffer(512)
+            required = wintypes.DWORD()
+            if _setupapi.SetupDiGetDeviceInstanceIdW(
+                    device_set, ctypes.byref(info), instance_buffer,
+                    len(instance_buffer), ctypes.byref(required)):
+                name = (_device_property(device_set, info, SPDRP_FRIENDLYNAME)
+                        or _device_property(device_set, info, SPDRP_DEVICEDESC)
+                        or "Generic Monitor")
+                monitors.append({"name": name, "id": instance_buffer.value,
+                                 "status": "OK" if _device_started(info.DevInst) else "Error"})
+            index += 1
+    finally:
+        _setupapi.SetupDiDestroyDeviceInfoList(device_set)
     return monitors
 
 
+def reset_monitor_devices():
+    """등록된 모니터 장치 노드를 제거하고 연결된 장치를 다시 검색한다."""
+    monitors = list_monitors(present_only=False)
+    removed = 0
+    for monitor in monitors:
+        try:
+            result = subprocess.run(
+                ["pnputil.exe", "/remove-device", monitor["id"], "/force"],
+                capture_output=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if result.returncode == 0:
+                removed += 1
+        except subprocess.TimeoutExpired:
+            continue
+    try:
+        subprocess.run(["pnputil.exe", "/scan-devices"], capture_output=True,
+                       timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("모니터 장치 재검색 시간이 초과되었습니다.") from exc
+    subprocess.Popen(["DisplaySwitch.exe", "/extend"],
+                     creationflags=subprocess.CREATE_NO_WINDOW)
+    time.sleep(3)
+    return removed
+
+
 def monitor_status(instance_id):
-    escaped = instance_id.replace("'", "''")
-    result = run_powershell(
-        f"(Get-PnpDevice -InstanceId '{escaped}' -ErrorAction SilentlyContinue).Status"
-    )
-    return result.stdout.strip()
+    return "OK" if _device_started(_locate_device(instance_id)) else "Error"
 
 
 def set_monitor_enabled(instance_id, enabled):
-    escaped = instance_id.replace("'", "''")
-    verb = "Enable-PnpDevice" if enabled else "Disable-PnpDevice"
-    result = run_powershell(
-        f"{verb} -InstanceId '{escaped}' -Confirm:$false -ErrorAction Stop"
-    )
-    if result.returncode != 0:
+    def state_matches():
+        try:
+            is_enabled = monitor_status(instance_id).upper() == "OK"
+        except RuntimeError:
+            is_enabled = False
+        return is_enabled == enabled
+
+    # 이미 원하는 상태라면 pnputil을 다시 호출하지 않는다.
+    if state_matches():
+        return
+
+    devinst = _locate_device(instance_id)
+    if enabled:
+        api_result = _cfgmgr32.CM_Enable_DevNode(devinst, 0)
+    else:
+        api_result = _cfgmgr32.CM_Disable_DevNode(devinst, CM_DISABLE_PERSIST)
+
+    result = None
+    if api_result != 0:
         action = "/enable-device" if enabled else "/disable-device"
-        result = subprocess.run(
-            ["pnputil.exe", action, instance_id], capture_output=True, timeout=20
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"모니터 {'활성화' if enabled else '비활성화'} 실패")
-    time.sleep(2)
-    if enabled and monitor_status(instance_id).upper() != "OK":
-        raise RuntimeError("활성화 명령 후에도 모니터 상태가 OK가 아닙니다.")
+        try:
+            result = subprocess.run(
+                ["pnputil.exe", action, instance_id], capture_output=True,
+                timeout=8, creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("모니터 장치 변경 응답 시간이 초과되었습니다.") from exc
+
+    # pnputil 종료 직후에는 장치 관리자 상태 반영이 늦을 수 있다.
+    # 반환 코드보다 실제 상태를 우선하며 최대 8초 동안 재확인한다.
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if state_matches():
+            return
+        time.sleep(0.5)
+
+    if result is not None and result.returncode != 0:
+        raise RuntimeError(f"모니터 {'활성화' if enabled else '비활성화'} 명령 실패")
+    raise RuntimeError(
+        f"모니터 {'활성화' if enabled else '비활성화'} 상태 확인 시간이 초과되었습니다."
+    )
 
 
 def get_mode():
