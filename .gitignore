@@ -6,3 +6,9 @@ __pycache__/
 *.spec
 .idea/
 .vscode/
+
+# Keep application source and local build configuration out of the repository.
+gui.py
+stretch.py
+build.ps1
+requirements.txt
